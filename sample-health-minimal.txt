@@ -1,0 +1,4 @@
+There are a lot of things that could
+trigger redaction regarding health data.
+
+max 120/80

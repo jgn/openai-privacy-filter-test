@@ -1,0 +1,19 @@
+Dear John,
+
+Please find the invoice for your recent consultation. Your payment of $4,500 is
+due by June 15, 2025.
+
+Patient: Alice Johnson
+Date of Birth: 03/14/1987
+SSN: 482-91-3347
+Address: 742 Evergreen Terrace, Springfield, IL 62704
+Phone: (555) 867-5309
+Email: alice.johnson@gmail.com
+
+Your account number is 8837-2291-0044. If you have questions, contact our
+billing department at billing@springfieldclinic.com or visit
+https://portal.springfieldclinic.com/account/alice.johnson.
+
+Regards,
+Dr. Robert Chen
+Springfield Medical Associates

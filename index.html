@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Filter Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f5f5f5;
+    color: #1a1a1a;
+    padding: 2rem;
+    max-width: 800px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 1.5rem; }
+  textarea {
+    width: 100%;
+    height: 180px;
+    padding: 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    resize: vertical;
+  }
+  textarea:focus { outline: none; border-color: #4a90d9; }
+  button {
+    margin-top: 0.75rem;
+    padding: 0.6rem 1.5rem;
+    background: #1a1a1a;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  button:hover { background: #333; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  #status {
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: #666;
+    min-height: 1.2em;
+  }
+  .progress-bar {
+    margin-top: 0.5rem;
+    height: 6px;
+    background: #ddd;
+    border-radius: 3px;
+    overflow: hidden;
+    display: none;
+  }
+  .progress-bar .fill {
+    height: 100%;
+    background: #1a1a1a;
+    border-radius: 3px;
+    transition: width 0.3s;
+    width: 0%;
+  }
+  #output-section { margin-top: 1.5rem; display: none; }
+  #output-section h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
+  #output {
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 0.75rem;
+    white-space: pre-wrap;
+    font-size: 0.95rem;
+    line-height: 1.6;
+  }
+  .redacted {
+    background: #1a1a1a;
+    color: #fff;
+    padding: 0.1em 0.4em;
+    border-radius: 3px;
+    font-size: 0.85em;
+    cursor: help;
+  }
+  #legend {
+    margin-top: 0.75rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+  }
+  #legend span {
+    background: #eee;
+    padding: 0.2em 0.5em;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Privacy Filter</h1>
+<p class="subtitle">Runs <a href="https://huggingface.co/openai/privacy-filter">openai/privacy-filter</a> locally in your browser via ONNX Runtime. No data leaves your machine.</p>
+
+<textarea id="input" placeholder="Paste text here...">Dear John,
+
+Please find the invoice for your recent consultation. Your payment of $4,500 is due by June 15, 2025.
+
+Patient: Alice Johnson
+Date of Birth: 03/14/1987
+SSN: 482-91-3347
+Address: 742 Evergreen Terrace, Springfield, IL 62704
+Phone: (555) 867-5309
+Email: alice.johnson@gmail.com
+
+Your account number is 8837-2291-0044. If you have questions, contact our billing department at billing@springfieldclinic.com or visit https://portal.springfieldclinic.com/account/alice.johnson.
+
+Regards,
+Dr. Robert Chen
+Springfield Medical Associates</textarea>
+
+<button id="btn" onclick="runRedact()" disabled>Loading model...</button>
+<div id="status"></div>
+<div class="progress-bar" id="progress"><div class="fill" id="progress-fill"></div></div>
+
+<div id="output-section">
+  <h2>Redacted Output</h2>
+  <div id="output"></div>
+  <div id="legend"></div>
+</div>
+
+<script type="module">
+import { AutoTokenizer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4";
+import * as ort from "https://cdn.jsdelivr.net/npm/onnxruntime-web@1/dist/ort.all.bundle.min.mjs";
+
+const MODEL_ID = "openai/privacy-filter";
+const ONNX_FILE = "onnx/model_q4f16.onnx";
+const ONNX_DATA = "onnx/model_q4f16.onnx_data";
+
+const ID2LABEL = {
+  0:"O",
+  1:"B-account_number",2:"I-account_number",3:"E-account_number",4:"S-account_number",
+  5:"B-private_address",6:"I-private_address",7:"E-private_address",8:"S-private_address",
+  9:"B-private_date",10:"I-private_date",11:"E-private_date",12:"S-private_date",
+  13:"B-private_email",14:"I-private_email",15:"E-private_email",16:"S-private_email",
+  17:"B-private_person",18:"I-private_person",19:"E-private_person",20:"S-private_person",
+  21:"B-private_phone",22:"I-private_phone",23:"E-private_phone",24:"S-private_phone",
+  25:"B-private_url",26:"I-private_url",27:"E-private_url",28:"S-private_url",
+  29:"B-secret",30:"I-secret",31:"E-secret",32:"S-secret",
+};
+
+const CATEGORY_LABELS = {
+  private_person: "Person",
+  private_email: "Email",
+  private_phone: "Phone",
+  private_address: "Address",
+  private_date: "Date",
+  private_url: "URL",
+  account_number: "Account #",
+  secret: "Secret",
+};
+
+const btn = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+const progressBar = document.getElementById("progress");
+const progressFill = document.getElementById("progress-fill");
+
+let tokenizer = null;
+let session = null;
+
+function setStatus(msg) { statusEl.textContent = msg; }
+function setProgress(pct) {
+  progressBar.style.display = pct > 0 && pct < 100 ? "block" : "none";
+  progressFill.style.width = pct + "%";
+}
+
+async function fetchWithProgress(url, label) {
+  const resp = await fetch(url);
+  const total = +resp.headers.get("content-length") || 0;
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    if (total > 0) {
+      const pct = Math.round((loaded / total) * 100);
+      setStatus(`${label}: ${pct}% (${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB)`);
+      setProgress(pct);
+    }
+  }
+  const result = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return result.buffer;
+}
+
+function hfUrl(path) {
+  return `https://huggingface.co/${MODEL_ID}/resolve/main/${path}`;
+}
+
+async function loadModel() {
+  try {
+    setStatus("Loading tokenizer...");
+    tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
+
+    setStatus("Downloading ONNX model (~809 MB, cached after first load)...");
+    const modelBuf = await fetchWithProgress(hfUrl(ONNX_FILE), "Model graph");
+    const dataBuf = await fetchWithProgress(hfUrl(ONNX_DATA), "Model weights");
+
+    setStatus("Initializing ONNX Runtime session...");
+    setProgress(0);
+    session = await ort.InferenceSession.create(modelBuf, {
+      executionProviders: ["wasm"],
+      externalData: [{ path: ONNX_DATA.split("/").pop(), data: dataBuf }],
+    });
+
+    btn.disabled = false;
+    btn.textContent = "Redact";
+    setStatus("Model ready.");
+  } catch (e) {
+    setStatus("Failed to load model: " + e.message);
+    console.error(e);
+  }
+}
+
+function decodeSpans(tokenLabels, offsets, text) {
+  const spans = [];
+  let current = null;
+
+  for (let i = 0; i < tokenLabels.length; i++) {
+    const label = tokenLabels[i];
+    const [start, end] = offsets[i];
+    if (start === end) continue; // special tokens
+
+    if (label === "O") {
+      if (current) { spans.push(current); current = null; }
+      continue;
+    }
+
+    const [prefix, ...rest] = label.split("-");
+    const category = rest.join("-");
+
+    if (prefix === "S") {
+      if (current) spans.push(current);
+      spans.push({ start, end, category, score: 1.0 });
+      current = null;
+    } else if (prefix === "B") {
+      if (current) spans.push(current);
+      current = { start, end, category, score: 1.0 };
+    } else if (prefix === "I" && current && current.category === category) {
+      current.end = end;
+    } else if (prefix === "E") {
+      if (current && current.category === category) {
+        current.end = end;
+        spans.push(current);
+        current = null;
+      } else {
+        // standalone E — treat as single
+        if (current) spans.push(current);
+        spans.push({ start, end, category, score: 1.0 });
+        current = null;
+      }
+    } else {
+      // unexpected transition — close current, start new
+      if (current) spans.push(current);
+      current = { start, end, category, score: 1.0 };
+    }
+  }
+  if (current) spans.push(current);
+  return spans;
+}
+
+function mergeSpans(spans) {
+  if (spans.length === 0) return [];
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  const merged = [{ ...sorted[0] }];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = merged[merged.length - 1];
+    const cur = sorted[i];
+    if (cur.start <= prev.end && cur.category === prev.category) {
+      prev.end = Math.max(prev.end, cur.end);
+    } else {
+      merged.push({ ...cur });
+    }
+  }
+  return merged;
+}
+
+function renderRedacted(text, spans) {
+  const output = document.getElementById("output");
+  const legend = document.getElementById("legend");
+  const section = document.getElementById("output-section");
+  output.innerHTML = "";
+
+  const seen = new Set();
+  let cursor = 0;
+
+  for (const span of spans) {
+    if (span.start > cursor) {
+      output.appendChild(document.createTextNode(text.slice(cursor, span.start)));
+    }
+    const label = CATEGORY_LABELS[span.category] || span.category;
+    const el = document.createElement("span");
+    el.className = "redacted";
+    el.textContent = `[${label}]`;
+    el.title = text.slice(span.start, span.end) + ` (${span.category})`;
+    output.appendChild(el);
+    seen.add(span.category);
+    cursor = span.end;
+  }
+  if (cursor < text.length) {
+    output.appendChild(document.createTextNode(text.slice(cursor)));
+  }
+
+  legend.innerHTML = "";
+  for (const cat of seen) {
+    const s = document.createElement("span");
+    s.textContent = CATEGORY_LABELS[cat] || cat;
+    legend.appendChild(s);
+  }
+  section.style.display = "block";
+}
+
+function computeOffsets(ids, text) {
+  const offsets = [];
+  let charPos = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const tokenText = tokenizer.decode([ids[i]]);
+    if (!tokenText) {
+      offsets.push([charPos, charPos]);
+      continue;
+    }
+    const idx = text.indexOf(tokenText, charPos);
+    if (idx >= 0) {
+      offsets.push([idx, idx + tokenText.length]);
+      charPos = idx + tokenText.length;
+    } else {
+      // Token text might have normalized whitespace; search char-by-char
+      const stripped = tokenText.trimStart();
+      const ws = tokenText.length - stripped.length;
+      const idx2 = text.indexOf(stripped, charPos);
+      if (idx2 >= 0) {
+        const start = Math.max(charPos, idx2 - ws);
+        offsets.push([start, idx2 + stripped.length]);
+        charPos = idx2 + stripped.length;
+      } else {
+        offsets.push([charPos, charPos]);
+      }
+    }
+  }
+  return offsets;
+}
+
+window.runRedact = async function () {
+  const text = document.getElementById("input").value;
+  if (!text.trim()) return;
+
+  btn.disabled = true;
+  btn.textContent = "Redacting...";
+  setStatus("Tokenizing...");
+
+  try {
+    const encoded = tokenizer(text);
+    const ids = Array.from(encoded.input_ids.data, v => Number(v));
+
+    const offsets = computeOffsets(ids, text);
+    console.log("tokens:", ids.length, "offsets sample:", offsets.slice(0, 5));
+
+    const inputIds = new ort.Tensor("int64", new BigInt64Array(ids.map(v => BigInt(v))), [1, ids.length]);
+    const attentionMask = new ort.Tensor("int64", new BigInt64Array(ids.length).fill(1n), [1, ids.length]);
+
+    setStatus("Running inference...");
+    const t0 = performance.now();
+    const results = await session.run({
+      input_ids: inputIds,
+      attention_mask: attentionMask,
+    });
+    const inferenceMs = performance.now() - t0;
+
+    const logits = results.logits.data;
+    const seqLen = ids.length;
+    const numClasses = 33;
+    const tokenLabels = [];
+
+    for (let i = 0; i < seqLen; i++) {
+      let maxIdx = 0;
+      let maxVal = -Infinity;
+      for (let j = 0; j < numClasses; j++) {
+        const val = logits[i * numClasses + j];
+        if (val > maxVal) { maxVal = val; maxIdx = j; }
+      }
+      tokenLabels.push(ID2LABEL[maxIdx]);
+    }
+
+    console.log("labels:", tokenLabels.filter(l => l !== "O"));
+
+    const spans = decodeSpans(tokenLabels, offsets, text);
+    const merged = mergeSpans(spans);
+    renderRedacted(text, merged);
+    const msPerToken = (inferenceMs / seqLen).toFixed(1);
+    setStatus(`Done — found ${merged.length} PII span${merged.length !== 1 ? "s" : ""}. Inference: ${Math.round(inferenceMs)} ms total, ${msPerToken} ms/token (${seqLen} tokens).`);
+  } catch (e) {
+    setStatus("Error: " + e.message);
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Redact";
+  }
+};
+
+loadModel();
+</script>
+
+</body>
+</html>
